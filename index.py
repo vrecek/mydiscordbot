@@ -31,31 +31,27 @@ class DClient(discord.Client):
         self.music_dir:   str   = music_dir
 
         self.file_dir:    str   = file_dir
-        self.file_paths:  list  = []
+        self.file_paths:  list  = {}
         self.file_list:   dict  = {}
-        self.file_buff:   dict  = {
-            "memes": {
-                "img": [],
-                "vid": []
-            },
+        self.file_buff:   dict  = {}
+        self.file_buff_s: int   = 5
 
-            "nsfw": {
-                "img": [],
-                "vid": []
-            },
-        }
-        self.pic_exts:   tuple = ('.png', '.jpg', '.jpeg')
+        self.nsfw_dirs:   list  = ['nsfw']
 
-        self.stopped:    bool  = True
-        self.music_curr: Optional[str] = None
+        self.pic_exts:    tuple = ('.png', '.jpg', '.jpeg')
+        self.vid_exts:    tuple = ('.mp4')
+
+        self.stopped:     bool  = True
+        self.music_curr:  Optional[str] = None
 
         # Files
         for dirtype in os.listdir(file_dir):
             self.file_list[dirtype] = []
+            self.file_buff[dirtype] = {"img": [], "vid": []}
 
             for file in os.listdir(f'{file_dir}/{dirtype}'):
                 self.file_list[dirtype].append(file)
-                self.file_paths.append(f'{file_dir}/{dirtype}/{file}')
+                self.file_paths[file] = f'{file_dir}/{dirtype}/{file}'
 
         # Music
         for artist in list(filter(lambda x: x != '_ignore', os.listdir(music_dir))):
@@ -71,50 +67,83 @@ class DClient(discord.Client):
                     self.music_paths[track_title] = f'{music_dir}/{artist}/{album}/{track}'
 
 
-    #
-    def _file_random_filtered(self, arg: str, ext: tuple, buff: list) -> str:
-        return random.choice(
-            list(filter(
-                lambda x: f'/{arg}/' in x and os.path.splitext(x)[1] in ext and x not in buff,
-                self.file_paths
-            ))
-        )
-
-    def _file_random_ext(self, arg: str) -> tuple:
-        return ('.mp4') if arg == 'vid' else self.pic_exts
-
-    def _file_list_ext(self, arr: list) -> list:
-        return [
-            list(filter(lambda x: os.path.splitext(x)[1] in self.pic_exts, arr)),
-            list(filter(lambda x: '.mp4' in x, arr))
-        ]
-
-    def _file_specific_file(self, arg: str) -> list:
-        return list(filter(lambda x: f'/{arg}' in x, self.file_paths))
+    # Cleaners
     
-    def _determineSendFileName(self, filepath: str) -> str:
-        fname: str = os.path.basename(filepath)
+    def _file_random_filter_ext(self, arr: list, exts: tuple) -> list:
+        return [x for x in arr if os.path.splitext(x)[1] in exts]
+    
+    # # # # #
 
-        return f'SPOILER_{fname}' if 'nsfw' in filepath else fname
-    #
+
+    # Options
+
+    # now
+    async def getCurrentSongInfo(self, res: Optional[any] = None) -> Optional[list]:
+        if not self.music_curr:
+            if res:
+                await self.say(res, 'Im not playing any music right now')
+                return
+            else: return [None, None, None]
+
+        s: list = self.music_curr.split('/')[1:]
+
+        artist, album, track = [' '.join(re.findall('[a-zA-Z][^A-Z]*', x)) for x in s]
+
+        track = track[track.find('_') + 1:]
+        track = track.replace('.mp3', '').replace('_', ' ')
+        track = f'{track[0].upper()}{track[1:]}'
+
+        if res:
+            await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}')
+        else: return [artist, album, track]
+
+    # # # # #
+
+    def determineSpoilerFileName(self, filepath: str) -> str:
+        fname:  str = os.path.basename(filepath)
+        isNsfw: bool = any([f'/{x}/' in filepath for x in self.nsfw_dirs])
+
+        return f'SPOILER_{fname}' if isNsfw else fname
+    
+    def getRandomSong(self, artist: str = None, album: str = None) -> str:
+        if (
+            (artist and artist not in self.music_list) or 
+            (album and album not in self.music_list[artist])
+        ):
+            raise Exception('Artist and/or Album does not exist')
 
 
-    def auto_play(self, res, vc) -> None:
-        next_track: str = random.choice(list(self.music_paths.values()))
+        if artist in self.music_list:
+            artistTracks: list = self.music_list[artist]
+
+            if album in artistTracks:
+                artistTracks = artistTracks[album]
+            else:
+                artistTracks = list( chain.from_iterable(artistTracks.values()) )
+
+            randomFrom = self.music_paths[random.choice(artistTracks)]
+
+        else:
+            randomFrom = random.choice(list( self.music_paths.values() ))
+
+
+        return randomFrom
+
+    def auto_play(self, res, vc, artist: str = None, album: str = None) -> None:
+        next_track: str = self.getRandomSong(artist, album)
 
         if not self.stopped and not vc.is_playing():
             self.music_curr = next_track
 
             vc.play(
                 discord.FFmpegPCMAudio(source=next_track), 
-                after=lambda _: self.auto_play(res, vc)
+                after=lambda _: self.auto_play(res, vc, artist, album)
             )
-
 
     async def set_bot_avatar(self, picture: str) -> None:
         with open(picture, "rb") as file:
             await self.user.edit(avatar=file.read())
-
+            print('Bot avatar changed')
 
     async def say(self, res, msg: str) -> None:
         await res.channel.send(f'** @{res.author.name}\n\n{msg} **')
@@ -148,15 +177,17 @@ class DClient(discord.Client):
                 '''
                 $play <song> -> plays specified song
                 $play random -> continously plays random songs
+                $play random <artist> -> continously plays random <artist> songs
+                $play random <artist> <album> -> continously plays random <artist> <album> songs
 
                 $file <file> -> sends the specified file
                 $file <img|vid|list> <memes|nsfw> -> sends a random file
 
-                $now -> displays information about current song
+                $now -> displays information about the current song
 
                 $tracks -> views available artists
-                $tracks <artist> -> views artists' albums
-                $tracks <artist> <album> -> views albums' tracks
+                $tracks <artist> -> views <artist> albums
+                $tracks <artist> <album> -> views <album> tracks
 
                 $stop -> stops the music
                 $pause -> pauses the music
@@ -165,72 +196,58 @@ class DClient(discord.Client):
 
             # Send a file
             case 'file':
-                try: 
-                    isAnExtension: bool = MSG_ARG1.endswith(('.mp4', *self.pic_exts))
+                dirnames: list = self.file_list.keys()
 
-                    if MSG_ARG2 not in ['memes', 'nsfw'] and not isAnExtension: 
-                        raise Exception
-                except:
-                    await self.say(res, f'{PREFIX}file <img|vid|list> <memes|nsfw>\n{PREFIX}file <file>')
-                    return
-                
+                # List all files
+                if MSG_ARG1 == 'list' and MSG_ARG2 in dirnames:
+                    files: list = self.file_list[MSG_ARG2]
+                    vid:   list = [x for x in files if os.path.splitext(x)[1] in self.vid_exts]
+                    pic:   list = [x for x in files if os.path.splitext(x)[1] in self.pic_exts]
 
-                # Get the list of all files
-                if MSG_ARG1 == 'list':
-                    pic, vid = self._file_list_ext(self.file_list[MSG_ARG2])
-
-                    await self.say(res, f'-Images-\n{'\n'.join(pic)}\n\n-Videos-\n{'\n'.join(vid)}')
+                    await self.say(res, f'-IMAGES-\n{'\n'.join(pic)}\n\n-VIDEOS-\n{'\n'.join(vid)}')
                     return
 
 
-                # Send a specific file
-                if isAnExtension:
-                    try: file: str = self._file_specific_file(MSG_ARG1)[0]
-                    except:
-                        await self.say(res, 'File does not exist')
-                        return
+                filepath: Optional[str] = None
 
-                    fname: str = self._determineSendFileName(file)
+                # Send the specific file
+                if MSG_ARG1 in self.file_paths and MSG_ARG1.endswith((*self.vid_exts, *self.pic_exts)):
+                    filepath = self.file_paths[MSG_ARG1]
 
-                    await res.channel.send(file=discord.File(file, fname)) 
+                # Send a random file
+                if MSG_ARG1 in ['img', 'vid'] and MSG_ARG2 in dirnames:
+                    files: list = self.file_list[MSG_ARG2]
+                    
+                    if MSG_ARG1 == 'img':
+                        selected: list = self._file_random_filter_ext(files, self.pic_exts)
+                    else:
+                        selected: list = self._file_random_filter_ext(files, self.vid_exts)
+
+                    buff_list:     list = self.file_buff[MSG_ARG2][MSG_ARG1]
+                    filtered_buff: list = [x for x in selected if x not in buff_list]
+                    random_item:   str  = random.choice(filtered_buff)
+
+                    if len(buff_list) >= self.file_buff_s:
+                        self.file_buff[MSG_ARG2][MSG_ARG1].pop(0)    
+
+                    self.file_buff[MSG_ARG2][MSG_ARG1].append(random_item)
+
+                    filepath = self.file_paths[random_item]
+
+
+                if not filepath:
+                    keys: str = ' | '.join(self.file_list.keys())
+
+                    await self.say(res, f'Requested file does not exist\n\n{PREFIX}file <img | vid | list> <{keys}>\n{PREFIX}file <file>')
                     return
 
 
-                # Random file
-                if MSG_ARG1 in ['img', 'vid']:
-                    ext:  tuple = self._file_random_ext(MSG_ARG1)
-                    buff: list  = self.file_buff[MSG_ARG2][MSG_ARG1]
-                    file: list  = self._file_random_filtered(MSG_ARG2, ext, buff)
-                    fname: str = self._determineSendFileName(file)
-
-                    if len(buff) > 4:
-                        buff.pop(0)
-
-                    buff.append(file)
-
-                    self.file_buff[MSG_ARG2][MSG_ARG1] = buff
-
-                    await res.channel.send(file=discord.File(file, fname))
-                    return
-                
-
-                await self.say(res, f'{PREFIX}file <img|vid|list> <memes|nsfw>\n{PREFIX}file <file>')
+                filename: str = self.determineSpoilerFileName(filepath)
+                await res.channel.send(file=discord.File(filepath, filename))
 
             # Now
             case 'now':
-                if not self.music_curr:
-                    await self.say(res, 'Im not playing any music right now')
-                    return
-
-                s: list = self.music_curr.split('/')[1:]
-
-                artist, album, track = [' '.join(re.findall('[a-zA-Z][^A-Z]*', x)) for x in s]
-
-                track = track[track.find('_') + 1:]
-                track = track.replace('.mp3', '').replace('_', ' ')
-                track = f'{track[0].upper()}{track[1:]}'
-
-                await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}')
+                await self.getCurrentSongInfo(res)
 
             # List tracks
             case 'tracks':
@@ -246,41 +263,46 @@ class DClient(discord.Client):
             # Play
             case 'play':
                 if not MSG_ARG1:
-                    await self.say(res, f'{PREFIX}play random\n{PREFIX}play X')
+                    await self.say(res, f'{PREFIX}play random\n{PREFIX}play random <artist>\n{PREFIX}play random <artist> <album>\n{PREFIX}play <song>')
+                    return
+
+                if not AUTHOR_VOICE:
+                    await self.say(res, f'Please connect to the voice channel')
                     return
 
 
+                vc = BOT_VOICE_CLIENT if BOT_VOICE_CLIENT else await AUTHOR_VOICE.channel.connect()
+                if vc.is_playing():
+                    self.stopped = True
+                    vc.stop()
+
+
                 if MSG_ARG1 == 'random':
-                    trackpath: str = random.choice(list(self.music_paths.values()))
-                    trackname: str = 'random music'
+                    try: trackpath: str = self.getRandomSong(MSG_ARG2, MSG_ARG3)
+                    except Exception as e:
+                        await self.say(res, str(e))
+                        return
+
+                    tracktext: str = f'random music\nStarting with:'
+
+                    play_next = lambda: self.auto_play(res, vc, MSG_ARG2, MSG_ARG3)
 
                 else:
                     play_next = lambda: None
 
                     try: 
                         trackpath: str = self.music_paths[MSG_ARG1]
-                        trackname: str = MSG_ARG1
+                        tracktext: str = 'selected song:'
                     except:
                         await self.say(res, f'Track {MSG_ARG1} not found')
                         return
 
 
-                if not AUTHOR_VOICE:
-                    await self.say(res, f'No voice channel')
-                    return
-
-
-                vc = BOT_VOICE_CLIENT if BOT_VOICE_CLIENT else await AUTHOR_VOICE.channel.connect()
-
-                if vc.is_playing():
-                    self.stopped = True
-                    vc.stop()
-
-                if 'play_next' not in locals():
-                    play_next = lambda: self.auto_play(res, vc)
-
                 self.music_curr = trackpath
                 self.stopped = False
+
+                artist, album, track = await self.getCurrentSongInfo()
+                trackname: str = f'{tracktext} {artist} - {track} ({album})'
 
                 vc.play(
                     discord.FFmpegPCMAudio(source=trackpath), 
