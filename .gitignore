@@ -1,4 +1,6 @@
 files/
 music/
 botavatar.jpg
+cut.sh
+append.sh
 .env

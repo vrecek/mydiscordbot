@@ -3,9 +3,12 @@ import os
 import random
 import signal
 import re
+import subprocess
+import threading
 from dotenv import load_dotenv
 from typing import Optional
 from itertools import chain
+from asyncio import run
 
 
 load_dotenv('.env')
@@ -29,10 +32,13 @@ class DClient(discord.Client):
         self.music_list:  dict  = {}
         self.music_paths: dict  = {}
         self.music_dir:   str   = music_dir
+        self.music_curr:  Optional[dict] = None
 
-        self.file_dir:    str   = file_dir
-        self.file_paths:  list  = {}
+        self.time_thread: any   = None
+
         self.file_list:   dict  = {}
+        self.file_paths:  list  = {}
+        self.file_dir:    str   = file_dir
         self.file_buff:   dict  = {}
         self.file_buff_s: int   = 5
 
@@ -42,7 +48,6 @@ class DClient(discord.Client):
         self.vid_exts:    tuple = ('.mp4')
 
         self.stopped:     bool  = True
-        self.music_curr:  Optional[str] = None
 
         # Files
         for dirtype in os.listdir(file_dir):
@@ -71,7 +76,20 @@ class DClient(discord.Client):
     
     def _file_random_filter_ext(self, arr: list, exts: tuple) -> list:
         return [x for x in arr if os.path.splitext(x)[1] in exts]
-    
+
+    def _countTimeLoop(self, vc) -> None:
+        if self.time_thread:
+            self.time_thread.cancel()
+
+        def fn() -> None:
+            if vc.is_playing():
+                self.music_curr['curr_duration'] += 1
+
+            self.time_thread = threading.Timer(1.0, fn)
+            self.time_thread.start()
+
+        fn()
+
     # # # # #
 
 
@@ -79,23 +97,30 @@ class DClient(discord.Client):
 
     # now
     async def getCurrentSongInfo(self, res: Optional[any] = None) -> Optional[list]:
-        if not self.music_curr:
+        current: Optional[dict] = self.music_curr
+
+        if not current:
             if res:
                 await self.say(res, 'Im not playing any music right now')
                 return
             else: return [None, None, None]
 
-        s: list = self.music_curr.split('/')[1:]
 
-        artist, album, track = [' '.join(re.findall('[a-zA-Z][^A-Z]*', x)) for x in s]
+        splitted:       list = current['relpath'].split('/')[1:]
+        total_duration: int  = current['total_duration']
+
+        artist, album, track = [' '.join(re.findall('[a-zA-Z][^A-Z]*', x)) for x in splitted]
 
         track = track[track.find('_') + 1:]
         track = track.replace('.mp3', '').replace('_', ' ')
         track = f'{track[0].upper()}{track[1:]}'
 
+
         if res:
-            await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}')
-        else: return [artist, album, track]
+            time: str = f'{self.secondsToTime(current['curr_duration'])}/{self.secondsToTime(total_duration)}'
+
+            await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}\nDuration: {time}')
+        else: return [artist, album, track, total_duration]
 
     # # # # #
 
@@ -105,6 +130,19 @@ class DClient(discord.Client):
 
         return f'SPOILER_{fname}' if isNsfw else fname
     
+    def secondsToTime(self, secs: int) -> str:
+        m, s = divmod(secs, 60)
+
+        return f'{ f"0{m}"[-2:] }:{ f"0{s}"[-2:] }'
+
+    def stopCurrentSong(self) -> None:
+        if self.time_thread:
+            self.time_thread.cancel()
+
+        self.time_thread = None
+        self.music_curr = None
+        self.stopped = True
+
     def getRandomSong(self, artist: str = None, album: str = None) -> str:
         if (
             (artist and artist not in self.music_list) or 
@@ -129,16 +167,48 @@ class DClient(discord.Client):
 
         return randomFrom
 
+    def setTrack(self, trackpath: str) -> None:
+        abspath: str = f'{os.getcwd()}/{trackpath}'
+        stdout:  str = subprocess.run(
+            ['ffprobe', '-i', abspath, '-show_entries', 'format=duration', '-v', 'quiet', '-of', "csv=p=0"], stdout=subprocess.PIPE
+        ).stdout.decode('utf-8')[:-1]
+
+        self.music_curr = {
+            "relpath": trackpath,
+            "abspath": abspath,
+            "total_duration": int(float(stdout)),
+            "curr_duration": 0,
+        }
+
     def auto_play(self, res, vc, artist: str = None, album: str = None) -> None:
-        next_track: str = self.getRandomSong(artist, album)
-
         if not self.stopped and not vc.is_playing():
-            self.music_curr = next_track
+            next_track: str = self.getRandomSong(artist, album)
 
-            vc.play(
-                discord.FFmpegPCMAudio(source=next_track), 
-                after=lambda _: self.auto_play(res, vc, artist, album)
-            )
+            self.setTrack(next_track)
+            self.play(vc, lambda _: self.auto_play(res, vc, artist, album))
+
+    def play(self, vc, nextfn: callable):
+        if vc.is_playing():
+            vc.stop()
+
+        self.stopped = False
+        self._countTimeLoop(vc)
+
+        vc.play(
+            discord.FFmpegPCMAudio(source=self.music_curr['relpath']), 
+            after=nextfn
+        )
+
+    def returnInRows(self, arr: list, perRow: int, rowSpace: int, separator: str) -> str:
+        out: str = ''
+
+        for i,x in enumerate(arr):
+            if int(i) % perRow == 0:
+                out += '\n'
+
+            out += f'{separator}{x}{' ' * rowSpace}'
+
+        return out
 
     async def set_bot_avatar(self, picture: str) -> None:
         with open(picture, "rb") as file:
@@ -201,10 +271,14 @@ class DClient(discord.Client):
                 # List all files
                 if MSG_ARG1 == 'list' and MSG_ARG2 in dirnames:
                     files: list = self.file_list[MSG_ARG2]
-                    vid:   list = [x for x in files if os.path.splitext(x)[1] in self.vid_exts]
-                    pic:   list = [x for x in files if os.path.splitext(x)[1] in self.pic_exts]
 
-                    await self.say(res, f'-IMAGES-\n{'\n'.join(pic)}\n\n-VIDEOS-\n{'\n'.join(vid)}')
+                    vid:   list = self._file_random_filter_ext(files, self.vid_exts)
+                    vid = self.returnInRows(vid, 5, 2, '-')
+
+                    pic:   list = self._file_random_filter_ext(files, self.pic_exts)
+                    pic = self.returnInRows(pic, 5, 2, '-')
+
+                    await self.say(res, f'Images:\n{pic}\n\nVideos:\n{vid}')
                     return
 
 
@@ -251,17 +325,28 @@ class DClient(discord.Client):
 
             # List tracks
             case 'tracks':
+                ls:        str = ''
+                msg:       str = ''
+                separator: str = '-'
+
                 if not MSG_ARG1 or MSG_ARG1 not in self.music_list:
-                    await self.say(res, f'Available artists: \n-{'\n-'.join(list(self.music_list.keys()))}')
+                    ls  = self.returnInRows(self.music_list.keys(), 3, 2, separator)
+                    msg = f'Available artists:\n{ls}'
                 
                 elif not MSG_ARG2 or MSG_ARG2 not in self.music_list[MSG_ARG1]:
-                    await self.say(res, f'Available {MSG_ARG1} albums: \n-{'\n-'.join(self.music_list[MSG_ARG1])}')
+                    ls  = self.returnInRows(self.music_list[MSG_ARG1], 2, 2, separator)
+                    msg = f'Available {MSG_ARG1} albums:\n{ls}'
                 
                 else:
-                    await self.say(res, f'{MSG_ARG1} - {MSG_ARG2} tracks: \n-{'\n-'.join(self.music_list[MSG_ARG1][MSG_ARG2])}')
+                    ls  = self.returnInRows(self.music_list[MSG_ARG1][MSG_ARG2], 4, 5, separator)
+                    msg = f'{MSG_ARG1} - {MSG_ARG2} tracks:\n{ls}'
+
+                await self.say(res, msg)
 
             # Play
             case 'play':
+                self.stopped = True
+
                 if not MSG_ARG1:
                     await self.say(res, f'{PREFIX}play random\n{PREFIX}play random <artist>\n{PREFIX}play random <artist> <album>\n{PREFIX}play <song>')
                     return
@@ -270,12 +355,7 @@ class DClient(discord.Client):
                     await self.say(res, f'Please connect to the voice channel')
                     return
 
-
                 vc = BOT_VOICE_CLIENT if BOT_VOICE_CLIENT else await AUTHOR_VOICE.channel.connect()
-                if vc.is_playing():
-                    self.stopped = True
-                    vc.stop()
-
 
                 if MSG_ARG1 == 'random':
                     try: trackpath: str = self.getRandomSong(MSG_ARG2, MSG_ARG3)
@@ -285,10 +365,10 @@ class DClient(discord.Client):
 
                     tracktext: str = f'random music\nStarting with:'
 
-                    play_next = lambda: self.auto_play(res, vc, MSG_ARG2, MSG_ARG3)
+                    play_next = lambda _: self.auto_play(res, vc, MSG_ARG2, MSG_ARG3)
 
                 else:
-                    play_next = lambda: None
+                    play_next = lambda _: self.stopCurrentSong()
 
                     try: 
                         trackpath: str = self.music_paths[MSG_ARG1]
@@ -298,24 +378,19 @@ class DClient(discord.Client):
                         return
 
 
-                self.music_curr = trackpath
-                self.stopped = False
+                self.setTrack(trackpath)
 
-                artist, album, track = await self.getCurrentSongInfo()
-                trackname: str = f'{tracktext} {artist} - {track} ({album})'
+                artist, album, track, duration = await self.getCurrentSongInfo()
+                trackname: str = f'{tracktext} {artist} - {track} ({album}) [{self.secondsToTime(duration)}]'
 
-                vc.play(
-                    discord.FFmpegPCMAudio(source=trackpath), 
-                    after=lambda _: play_next()
-                )
+                self.play(vc, play_next)
 
                 await self.say(res, f'Playing {trackname}')
 
             # Stop
             case 'stop':
                 if BOT_VOICE_CLIENT and BOT_VOICE_CLIENT.is_playing():
-                    self.stopped    = True
-                    self.music_curr = None
+                    self.stopCurrentSong()
 
                     await self.say(res, 'Stopped music')
                     BOT_VOICE_CLIENT.stop()
