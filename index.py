@@ -11,7 +11,7 @@ from itertools import chain
 
 
 load_dotenv('.env')
-signal.signal(signal.SIGINT, lambda x,y: os._exit(0))
+signal.signal(signal.SIGINT, lambda x,y: exit(0))
 
 
 TOKEN:     str = os.getenv('TOKEN')
@@ -47,6 +47,7 @@ class DClient(discord.Client):
         self.vid_exts:    tuple = ('.mp4')
         self.lock:        bool  = False
         self.stopped:     bool  = True
+        self.volume:      float = 1.0
 
         # Files
         for dirtype in os.listdir(file_dir):
@@ -131,7 +132,7 @@ class DClient(discord.Client):
         if res:
             time: str = f'{self.secondsToTime(current['curr_duration'])}/{self.secondsToTime(total_duration)}'
 
-            await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}\nDuration: {time}')
+            await self.say(res, f'Currently playing: \n\nArtist: {artist}\nAlbum: {album}\nTrack: {track}\nDuration: {time}\nVolume: {int(self.volume * 100)}%')
         else: return [artist, album, track, total_duration]
 
     # # # # #
@@ -154,8 +155,8 @@ class DClient(discord.Client):
             self.time_thread.cancel()
 
         self.time_thread = None
-        self.music_curr = None
-        self.stopped = True
+        self.music_curr  = None
+        self.stopped     = True
 
     def getRandomSong(self, artist: str = None, album: str = None) -> str:
         if (
@@ -204,27 +205,21 @@ class DClient(discord.Client):
             self.play(vc)
 
     def play(self, vc, skipBy: Optional[int] = None) -> None:
-        if vc.is_playing():
-            vc.stop()
-
-        opt: dict = {}
+        opt: dict = {'options': f'-af volume={self.volume}'}
         if skipBy:
             opt['before_options'] = f'-ss {skipBy}'
-
-        if self.lock_thread:
-            self.lock_thread.cancel()
-            self.lock_thread = None
 
         self.stopped = False
         self._countTimeLoop(vc)
 
-        self.lock_thread = threading.Timer(1.0, self.unlockFn)
-        self.lock_thread.start()
+        if vc.is_playing(): vc.stop()
 
         vc.play(
             discord.FFmpegPCMAudio(self.music_curr['relpath'], **opt), 
             after=self.music_curr['after_fn']
         )
+
+        threading.Timer(2.0, self.unlockFn).start()
 
     def returnInRows(self, arr: list, perRow: int, rowSpace: int, separator: str) -> str:
         out: str = ''
@@ -277,10 +272,12 @@ class DClient(discord.Client):
                 $play random <artist> -> continously plays random <artist> songs
                 $play random <artist> <album> -> continously plays random <artist> <album> songs
 
-                $file <file> -> sends the specified file
-                $file <img|vid|list> <memes|nsfw> -> sends a random file
-
                 $now -> displays information about the current song
+                $skip <int> -> skips the current song by <int> seconds
+                $volume <0-200> -> changes the volume
+
+                $file <file> -> sends the specified file
+                $file <img|vid|list> <memes|nsfw> -> sends a random file / lists available files
 
                 $tracks -> views available artists
                 $tracks <artist> -> views <artist> albums
@@ -350,6 +347,29 @@ class DClient(discord.Client):
             case 'now':
                 await self.getCurrentSongInfo(res)
 
+            # Volume
+            case 'volume':
+                if self.lock: return
+
+                try: 
+                    volume: float = int(MSG_ARG1) / 100
+
+                    if volume > 2 or volume < 0: raise Exception()
+                except:
+                    await self.say(res, 'Please specify % value (0-200)')
+                    return
+
+                self.volume = volume
+
+                duration: int = self.music_curr['curr_duration']
+
+                if self.music_curr and (self.music_curr['total_duration'] - duration) <= 10:
+                    await self.say(res, 'Volume will be changed on the next song')
+                    return 
+
+                self.lock = True
+                self.play(BOT_VOICE_CLIENT, duration)
+
             # List tracks
             case 'tracks':
                 ls:        str = ''
@@ -372,6 +392,8 @@ class DClient(discord.Client):
 
             # Skip by seconds
             case 'skip':
+                if self.lock: return
+
                 if not BOT_VOICE_CLIENT.is_playing():
                     await self.say(res, 'Im not playing any music right now')
                     return
@@ -380,11 +402,11 @@ class DClient(discord.Client):
                     return
 
                 plus_seconds:   int = int(MSG_ARG1)
-                total_duration: int = self.music_curr['total_duration']
                 new_duration:   int = self.music_curr['curr_duration'] + plus_seconds
 
-                if new_duration >= total_duration:
-                    new_duration = total_duration - 1
+                if new_duration >= self.music_curr['total_duration']:
+                    await self.say(res, 'Too many seconds to skip')
+                    return
 
                 self.lock = True
                 self.music_curr['curr_duration'] = new_duration
@@ -393,6 +415,8 @@ class DClient(discord.Client):
 
             # Play
             case 'play':
+                if self.lock: return
+
                 if not MSG_ARG1:
                     await self.say(res, f'{PREFIX}play random\n{PREFIX}play random <artist>\n{PREFIX}play random <artist> <album>\n{PREFIX}play <song>')
                     return
