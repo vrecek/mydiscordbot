@@ -5,6 +5,8 @@ import signal
 import re
 import subprocess
 import threading
+import ffmpeg
+import json
 from dotenv import load_dotenv
 from typing import Optional
 from itertools import chain
@@ -158,13 +160,15 @@ class DClient(discord.Client):
         self.music_curr  = None
         self.stopped     = True
 
+    def getRandomItem(self, arr: list) -> any:
+        return arr[random.SystemRandom().randint(0, len(arr) - 1)]
+
     def getRandomSong(self, artist: str = None, album: str = None) -> str:
         if (
             (artist and artist not in self.music_list) or 
             (album and album not in self.music_list[artist])
         ):
             raise Exception('Artist and/or Album does not exist')
-
 
         if artist in self.music_list:
             artistTracks: list = self.music_list[artist]
@@ -174,24 +178,21 @@ class DClient(discord.Client):
             else:
                 artistTracks = list( chain.from_iterable(artistTracks.values()) )
 
-            randomFrom = self.music_paths[random.choice(artistTracks)]
+            randomFrom: str = self.music_paths[self.getRandomItem(artistTracks)]
 
         else:
-            randomFrom = random.choice(list( self.music_paths.values() ))
-
+            randomFrom: str = self.getRandomItem( list(self.music_paths.values()) )
 
         return randomFrom
 
     def setTrack(self, trackpath: str, after_fn: callable) -> None:
-        abspath: str = f'{os.getcwd()}/{trackpath}'
-        stdout:  str = subprocess.run(
-            ['ffprobe', '-i', abspath, '-show_entries', 'format=duration', '-v', 'quiet', '-of', "csv=p=0"], stdout=subprocess.PIPE
-        ).stdout.decode('utf-8')[:-1]
-
+        abspath:  str = f'{os.getcwd()}/{trackpath}'
+        duration: str = ffmpeg.probe(abspath)['format']['duration']
+        
         self.music_curr = {
             "relpath": trackpath,
             "abspath": abspath,
-            "total_duration": int(float(stdout)),
+            "total_duration": int(float(duration)),
             "curr_duration": 0,
             "after_fn": after_fn
         }
@@ -205,14 +206,14 @@ class DClient(discord.Client):
             self.play(vc)
 
     def play(self, vc, skipBy: Optional[int] = None) -> None:
+        if vc.is_playing(): vc.stop()
+
         opt: dict = {'options': f'-af volume={self.volume}'}
         if skipBy:
             opt['before_options'] = f'-ss {skipBy}'
 
         self.stopped = False
         self._countTimeLoop(vc)
-
-        if vc.is_playing(): vc.stop()
 
         vc.play(
             discord.FFmpegPCMAudio(self.music_curr['relpath'], **opt), 
@@ -323,7 +324,7 @@ class DClient(discord.Client):
 
                     buff_list:     list = self.file_buff[MSG_ARG2][MSG_ARG1]
                     filtered_buff: list = [x for x in selected if x not in buff_list]
-                    random_item:   str  = random.choice(filtered_buff)
+                    random_item:   str  = self.getRandomItem(filtered_buff)
 
                     if len(buff_list) >= self.file_buff_size:
                         self.file_buff[MSG_ARG2][MSG_ARG1].pop(0)    
@@ -361,7 +362,7 @@ class DClient(discord.Client):
 
                 self.volume = volume
 
-                duration: int = self.music_curr['curr_duration']
+                duration: int = self.music_curr['curr_duration'] - 1
 
                 if self.music_curr and (self.music_curr['total_duration'] - duration) <= 10:
                     await self.say(res, 'Volume will be changed on the next song')
@@ -401,8 +402,7 @@ class DClient(discord.Client):
                     await self.say(res, 'Please specify seconds')
                     return
 
-                plus_seconds:   int = int(MSG_ARG1)
-                new_duration:   int = self.music_curr['curr_duration'] + plus_seconds
+                new_duration: int = self.music_curr['curr_duration'] + int(MSG_ARG1)
 
                 if new_duration >= self.music_curr['total_duration']:
                     await self.say(res, 'Too many seconds to skip')
