@@ -3,6 +3,11 @@ It allows to: <br>
 - play music <br>
 - send files
 
+# Requirements
+- linux file structure paths <br>
+- ffmpeg <br>
+- pip install -r requirements.txt
+
 # .env
 TOKEN="discord bot token" <br>
 PREFIX="command prefix"
